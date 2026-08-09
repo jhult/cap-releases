@@ -1,0 +1,234 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "CapSoftware/Cap tag or ref to build (default: latest release)"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cap-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: CapSoftware/Cap
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      needs_build: ${{ steps.compare.outputs.needs_build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve upstream tag
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAGGED_INPUT: ${{ inputs.upstream_tag }}
+        run: |
+          if [[ -n "$TAGGED_INPUT" ]]; then
+            upstream_tag="$TAGGED_INPUT"
+          else
+            upstream_tag=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)
+          fi
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${upstream_tag#cap-}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with latest published cap-v release
+        id: compare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -n "${{ inputs.upstream_tag }}" ]]; then
+            echo "Manual override; building ${{ steps.resolve.outputs.upstream_tag }} regardless"
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          our_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq '[.[] | select(.tag_name | startswith("cap-v")) | .tag_name][0]')
+          if [[ "$our_tag" == "${{ steps.resolve.outputs.upstream_tag }}" ]]; then
+            echo "Already built ${{ steps.resolve.outputs.upstream_tag }}; skipping"
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream release ${{ steps.resolve.outputs.upstream_tag }} (ours: ${our_tag:-none})"
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.needs_build == 'true'
+    runs-on: ${{ matrix.settings.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    env:
+      TRIPLE: ${{ matrix.settings.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout upstream source at release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.detect.outputs.upstream_tag }}
+          path: cap
+
+      - name: Inject updater override config
+        working-directory: cap
+        run: cp "${{ github.workspace }}/cap-selfbuilder-config.json" apps/desktop/src-tauri/cap-selfbuilder-config.json
+
+      - name: Write .env file
+        working-directory: cap
+        run: |
+          {
+            echo "appVersion=${{ needs.detect.outputs.version }}"
+            echo "VITE_ENVIRONMENT=production"
+            echo "VITE_SERVER_URL=https://cap.so"
+            echo "RUST_TARGET_TRIPLE=${{ env.TRIPLE }}"
+          } > .env
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.5.2
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: cap/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: cap
+        run: pnpm install
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            pkg-config \
+            curl \
+            wget \
+            file \
+            clang \
+            libclang-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxfixes-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libva-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          targets: ${{ env.TRIPLE }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.TRIPLE }}
+
+      - name: Run cap-setup
+        working-directory: cap
+        env:
+          RUST_TARGET_TRIPLE: ${{ env.TRIPLE }}
+        run: pnpm -w cap-setup
+
+      - name: Build desktop binaries
+        working-directory: cap
+        run: ${{ runner.os == 'Linux' && 'CARGO_PROFILE_RELEASE_DEBUG=0 ' || '' }}./scripts/build-desktop-binaries.sh ${{ env.TRIPLE }}
+
+      - name: Increase swap space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo swapoff /mnt/swapfile 2>/dev/null || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          swapon --show
+
+      - name: Increase pagefile size (Windows)
+        if: runner.os == 'Windows'
+        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 24GB
+          disk-root: "D:"
+
+      - name: Build desktop app
+        working-directory: cap/apps/desktop
+        env:
+          CI: "false"
+          RUST_TARGET_TRIPLE: ${{ env.TRIPLE }}
+          LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/target/{1}/release:{0}/target/native-deps/lib', github.workspace, env.TRIPLE) || '' }}
+        run: ${{ runner.os == 'Linux' && 'CARGO_PROFILE_RELEASE_DEBUG=0 ' || '' }}pnpm build:tauri --target ${{ env.TRIPLE }} --config src-tauri/tauri.prod.conf.json --config src-tauri/cap-selfbuilder-config.json ${{ runner.os == 'Windows' && '--bundles nsis' || runner.os == 'Linux' && '--bundles deb' || '' }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cap-${{ env.TRIPLE }}
+          if-no-files-found: warn
+          path: |
+            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.dmg
+            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.exe
+            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.deb
+            cap/target/${{ env.TRIPLE }}/release/cap
+            cap/target/${{ env.TRIPLE }}/release/cap.exe
+
+  publish:
+    needs: [detect, build]
+    if: needs.detect.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.detect.outputs.upstream_tag }}
+          name: Cap ${{ needs.detect.outputs.version }} (unofficial build)
+          body: |
+            Unofficial, unsigned source build of [CapSoftware/Cap ${{ needs.detect.outputs.version }}](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ needs.detect.outputs.upstream_tag }}).
+
+            macOS: Gatekeeper warning on first launch — right-click the app → Open, or run `xattr -dr com.apple.quarantine "Cap.app"`.
+            Windows: SmartScreen warning (the .exe is not code-signed) — choose "More info" → "Run anyway".
+            Linux: `.deb` — `sudo apt install ./Cap_*.deb`
+          generate_release_notes: true
+          files: artifacts/**/*
