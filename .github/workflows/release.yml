@@ -143,6 +143,7 @@ jobs:
             libpipewire-0.3-dev \
             libspa-0.2-dev \
             libasound2-dev \
+            libasound2-plugins \
             libdbus-1-dev \
             libudev-dev \
             libx11-dev \
