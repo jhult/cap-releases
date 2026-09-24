@@ -155,6 +155,7 @@ jobs:
             libxfixes-dev \
             libwayland-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libva-dev \
             patchelf
 
