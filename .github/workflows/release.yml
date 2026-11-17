@@ -194,14 +194,19 @@ jobs:
             cap -> target
             cap/apps/desktop-gpui -> target
 
+      # bash, not pwsh: setup.js shells out to Windows PowerShell 5.1, and a
+      # pwsh parent leaks PS 7's PSModulePath into it, which makes
+      # Expand-Archive fail silently (exit 0, nothing extracted).
       - name: Run cap-setup
         working-directory: cap
+        shell: bash
         env:
           RUST_TARGET_TRIPLE: ${{ env.TRIPLE }}
         run: bun run cap-setup
 
       - name: Build desktop binaries
         working-directory: cap
+        shell: bash
         run: ${{ runner.os == 'Linux' && 'CARGO_PROFILE_RELEASE_DEBUG=0 ' || '' }}./scripts/build-desktop-binaries.sh ${{ env.TRIPLE }}
 
       - name: Increase swap space (Linux)
@@ -228,6 +233,7 @@ jobs:
       # `tauri bundle`, so --config here is our updater override.
       - name: Build desktop app
         working-directory: cap
+        shell: bash
         env:
           CI: "false"
           CARGO_PROFILE_RELEASE_DEBUG: "0"
