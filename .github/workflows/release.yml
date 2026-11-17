@@ -91,10 +91,28 @@ jobs:
 
       - name: Inject updater override config
         working-directory: cap
-        run: cp "${{ github.workspace }}/cap-selfbuilder-config.json" apps/desktop/src-tauri/cap-selfbuilder-config.json
+        shell: bash
+        run: cp "${{ github.workspace }}/cap-selfbuilder-config.json" apps/desktop-gpui/cap-selfbuilder-config.json
+
+      # The GPUI app checks cdn.crabnebula.app for updates on its own
+      # (apps/desktop-gpui/src/installer.rs), with upstream's public key, so the
+      # Tauri updater override does not stop an unofficial build from updating
+      # itself into the official signed release. Point the endpoint at a
+      # reserved, non-resolvable host instead: scheduled checks then fail
+      # silently and an explicit "Check for updates" reports a check failure.
+      - name: Disable upstream updater endpoint
+        working-directory: cap
+        shell: bash
+        run: |
+          installer=apps/desktop-gpui/src/installer.rs
+          grep -q 'cdn\.crabnebula\.app/update/cap/cap' "$installer"
+          sed -i.bak 's|cdn\.crabnebula\.app/update/cap/cap|updates.invalid/cap/cap|' "$installer"
+          grep -q 'updates\.invalid/cap/cap' "$installer"
+          rm -f "$installer.bak"
 
       - name: Write .env file
         working-directory: cap
+        shell: bash
         run: |
           {
             echo "appVersion=${{ needs.detect.outputs.version }}"
@@ -105,7 +123,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -144,6 +162,7 @@ jobs:
             libspa-0.2-dev \
             libasound2-dev \
             libasound2-plugins \
+            pulseaudio-utils \
             libdbus-1-dev \
             libudev-dev \
             libx11-dev \
@@ -159,14 +178,21 @@ jobs:
             libva-dev \
             patchelf
 
+      # The root workspace pins 1.88.0 (rust-toolchain.toml). The GPUI app has
+      # its own workspace and toolchain; scripts/build-gpui-binary.sh installs
+      # that one (1.95.0) itself.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           targets: ${{ env.TRIPLE }}
 
+      # Two cargo workspaces: the repo root (sidecars) and apps/desktop-gpui.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ${{ env.TRIPLE }}
+          workspaces: |
+            cap -> target
+            cap/apps/desktop-gpui -> target
 
       - name: Run cap-setup
         working-directory: cap
@@ -197,25 +223,30 @@ jobs:
           maximum-size: 24GB
           disk-root: "D:"
 
+      # scripts/bundle-gpui.mjs builds the GPUI binary, stages it as Cap (the
+      # Tauri bundler is only the packager) and forwards the remaining args to
+      # `tauri bundle`, so --config here is our updater override.
       - name: Build desktop app
-        working-directory: cap/apps/desktop
+        working-directory: cap
         env:
           CI: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_STRIP: symbols
           RUST_TARGET_TRIPLE: ${{ env.TRIPLE }}
-          LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/target/{1}/release:{0}/target/native-deps/lib', github.workspace, env.TRIPLE) || '' }}
-        run: ${{ runner.os == 'Linux' && 'CARGO_PROFILE_RELEASE_DEBUG=0 ' || '' }}bun run build:tauri --target ${{ env.TRIPLE }} --config src-tauri/tauri.prod.conf.json --config src-tauri/cap-selfbuilder-config.json ${{ runner.os == 'Windows' && '--bundles nsis' || runner.os == 'Linux' && '--bundles deb' || '' }}
+          LD_LIBRARY_PATH: ${{ runner.os == 'Linux' && format('{0}/apps/desktop-gpui/target/{1}/release:{0}/target/native-deps/lib', github.workspace, env.TRIPLE) || '' }}
+        run: node scripts/bundle-gpui.mjs ${{ env.TRIPLE }} --bundles ${{ runner.os == 'Windows' && 'nsis' || runner.os == 'Linux' && 'deb' || 'app,dmg' }} --config cap-selfbuilder-config.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cap-${{ env.TRIPLE }}
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
-            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.dmg
-            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.exe
-            cap/target/${{ env.TRIPLE }}/release/bundle/*/*.deb
-            cap/target/${{ env.TRIPLE }}/release/cap
-            cap/target/${{ env.TRIPLE }}/release/cap.exe
+            cap/apps/desktop-gpui/target/${{ env.TRIPLE }}/release/bundle/*/*.dmg
+            cap/apps/desktop-gpui/target/${{ env.TRIPLE }}/release/bundle/*/*.exe
+            cap/apps/desktop-gpui/target/${{ env.TRIPLE }}/release/bundle/*/*.deb
+            cap/apps/desktop-gpui/target/${{ env.TRIPLE }}/release/Cap
+            cap/apps/desktop-gpui/target/${{ env.TRIPLE }}/release/Cap.exe
 
   publish:
     needs: [detect, build]
