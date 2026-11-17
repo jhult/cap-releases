@@ -17,7 +17,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Download through node fetch and through curl
+      - name: Fetch dxc archive with node fetch
         shell: bash
         working-directory: cap
         run: |
@@ -26,47 +26,36 @@ jobs:
           cat > /tmp/dl.mjs <<'EOF'
           import { createHash } from "node:crypto";
           import { writeFile } from "node:fs/promises";
-          const url = process.env.URL;
-          const out = process.env.OUT;
-          const response = await fetch(url);
-          console.log("status", response.status, "type", response.headers.get("content-type"), "length", response.headers.get("content-length"));
+          const response = await fetch(process.env.URL);
           const body = Buffer.from(await response.arrayBuffer());
-          await writeFile(out, body);
-          console.log("wrote", out, body.length, "sha256", createHash("sha256").update(body).digest("hex"));
+          await writeFile(process.env.OUT, body);
+          console.log("bytes", body.length, "sha256", createHash("sha256").update(body).digest("hex"));
           EOF
-          FFMPEG=https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip
-          DXC=https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/1.9.2607.13/microsoft.direct3d.dxc.1.9.2607.13.nupkg
-          URL=$FFMPEG OUT=target/ffmpeg-node.zip node /tmp/dl.mjs
-          URL=$DXC OUT=target/dxc-node.zip node /tmp/dl.mjs
-          curl -sSL -o target/ffmpeg-curl.zip "$FFMPEG"
-          curl -sSL -o target/dxc-curl.zip "$DXC"
-          ls -l target/*.zip
-          sha256sum target/*.zip
+          URL=https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/1.9.2607.13/microsoft.direct3d.dxc.1.9.2607.13.nupkg \
+            OUT=target/dxc-node.zip node /tmp/dl.mjs
 
-      - name: Expand the node-fetched archives with PowerShell 5.1
-        shell: powershell
+      - name: Expand-Archive through node child_process
+        shell: bash
         working-directory: cap
-        continue-on-error: true
         run: |
-          $ErrorActionPreference = "Continue"
-          Expand-Archive -Path "target/ffmpeg-node.zip" -DestinationPath "target/ex-node-ffmpeg" -Force
-          "ffmpeg errors=$($Error.Count) exit=$LASTEXITCODE"
-          if ($Error.Count -gt 0) { $Error[0].ToString() }
-          Expand-Archive -Path "target/dxc-node.zip" -DestinationPath "target/ex-node-dxc" -Force
-          "dxc errors=$($Error.Count) exit=$LASTEXITCODE"
-          if ($Error.Count -gt 0) { $Error[0].ToString() }
-          Get-ChildItem target/ex-node-dxc -Depth 3 | Select-Object -First 10 FullName
-
-      - name: Expand the curl-downloaded archives with PowerShell 5.1
-        shell: powershell
-        working-directory: cap
-        continue-on-error: true
-        run: |
-          $ErrorActionPreference = "Continue"
-          Expand-Archive -Path "target/ffmpeg-curl.zip" -DestinationPath "target/ex-curl-ffmpeg" -Force
-          "ffmpeg errors=$($Error.Count) exit=$LASTEXITCODE"
-          if ($Error.Count -gt 0) { $Error[0].ToString() }
-          Expand-Archive -Path "target/dxc-curl.zip" -DestinationPath "target/ex-curl-dxc" -Force
-          "dxc errors=$($Error.Count) exit=$LASTEXITCODE"
-          if ($Error.Count -gt 0) { $Error[0].ToString() }
-          Get-ChildItem target/ex-curl-dxc -Depth 3 | Select-Object -First 10 FullName
+          set -euo pipefail
+          node -v
+          cat > /tmp/exec.mjs <<'EOF'
+          import { exec } from "node:child_process";
+          exec(
+            'Expand-Archive -Path "target/dxc-node.zip" -DestinationPath "target/ex-exec-dxc" -Force',
+            { shell: "powershell.exe" },
+            (error, stdout, stderr) => {
+              console.log("error:", error && error.message);
+              console.log("stdout:", JSON.stringify(stdout));
+              console.log("stderr:", JSON.stringify(stderr));
+            },
+          );
+          EOF
+          node /tmp/exec.mjs
+          sleep 3
+          ls -la target/ || true
+          ls -la target/ex-exec-dxc 2>&1 | head -20 || true
+          echo "--- direct powershell ---"
+          powershell.exe -NoProfile -Command 'Expand-Archive -Path "target/dxc-node.zip" -DestinationPath "target/ex-direct-dxc" -Force; Write-Output ("errors=" + $Error.Count)'
+          ls -la target/ex-direct-dxc 2>&1 | head -10 || true
