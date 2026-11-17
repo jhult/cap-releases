@@ -17,43 +17,56 @@ jobs:
         with:
           node-version: 24
 
-      - name: Download zip
-        shell: pwsh
+      - name: Download through node fetch and through curl
+        shell: bash
         working-directory: cap
         run: |
-          New-Item -ItemType Directory -Force -Path target | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip" -OutFile "target/ffmpeg-7.1.zip"
-          Get-Item target/ffmpeg-7.1.zip | Select-Object Name, Length
+          set -euo pipefail
+          mkdir -p target
+          cat > /tmp/dl.mjs <<'EOF'
+          import { createHash } from "node:crypto";
+          import { writeFile } from "node:fs/promises";
+          const url = process.env.URL;
+          const out = process.env.OUT;
+          const response = await fetch(url);
+          console.log("status", response.status, "type", response.headers.get("content-type"), "length", response.headers.get("content-length"));
+          const body = Buffer.from(await response.arrayBuffer());
+          await writeFile(out, body);
+          console.log("wrote", out, body.length, "sha256", createHash("sha256").update(body).digest("hex"));
+          EOF
+          FFMPEG=https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip
+          DXC=https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/1.9.2607.13/microsoft.direct3d.dxc.1.9.2607.13.nupkg
+          URL=$FFMPEG OUT=target/ffmpeg-node.zip node /tmp/dl.mjs
+          URL=$DXC OUT=target/dxc-node.zip node /tmp/dl.mjs
+          curl -sSL -o target/ffmpeg-curl.zip "$FFMPEG"
+          curl -sSL -o target/dxc-curl.zip "$DXC"
+          ls -l target/*.zip
+          sha256sum target/*.zip
 
-      - name: Expand-Archive with Windows PowerShell 5.1
+      - name: Expand the node-fetched archives with PowerShell 5.1
         shell: powershell
         working-directory: cap
         continue-on-error: true
         run: |
-          Expand-Archive -Path "target/ffmpeg-7.1.zip" -DestinationPath "target" -Force
-          Write-Host "exit=$LASTEXITCODE"
-          Get-ChildItem target | Select-Object Name
+          $ErrorActionPreference = "Continue"
+          Expand-Archive -Path "target/ffmpeg-node.zip" -DestinationPath "target/ex-node-ffmpeg" -Force
+          "ffmpeg errors=$($Error.Count) exit=$LASTEXITCODE"
+          if ($Error.Count -gt 0) { $Error[0].ToString() }
+          Expand-Archive -Path "target/dxc-node.zip" -DestinationPath "target/ex-node-dxc" -Force
+          "dxc errors=$($Error.Count) exit=$LASTEXITCODE"
+          if ($Error.Count -gt 0) { $Error[0].ToString() }
+          Get-ChildItem target/ex-node-dxc -Depth 3 | Select-Object -First 10 FullName
 
-      - name: Expand-Archive with pwsh 7
-        shell: pwsh
+      - name: Expand the curl-downloaded archives with PowerShell 5.1
+        shell: powershell
         working-directory: cap
         continue-on-error: true
         run: |
-          Expand-Archive -Path "target/ffmpeg-7.1.zip" -DestinationPath "target" -Force
-          Get-ChildItem target | Select-Object Name
-
-      - name: 7z extract
-        shell: pwsh
-        working-directory: cap
-        continue-on-error: true
-        run: |
-          7z x -y "target/ffmpeg-7.1.zip" -otarget | Select-Object -Last 5
-          Get-ChildItem target | Select-Object Name
-
-      - name: Run setup.js directly
-        shell: pwsh
-        working-directory: cap
-        continue-on-error: true
-        env:
-          RUST_TARGET_TRIPLE: x86_64-pc-windows-msvc
-        run: node scripts/setup.js
+          $ErrorActionPreference = "Continue"
+          Expand-Archive -Path "target/ffmpeg-curl.zip" -DestinationPath "target/ex-curl-ffmpeg" -Force
+          "ffmpeg errors=$($Error.Count) exit=$LASTEXITCODE"
+          if ($Error.Count -gt 0) { $Error[0].ToString() }
+          Expand-Archive -Path "target/dxc-curl.zip" -DestinationPath "target/ex-curl-dxc" -Force
+          "dxc errors=$($Error.Count) exit=$LASTEXITCODE"
+          if ($Error.Count -gt 0) { $Error[0].ToString() }
+          Get-ChildItem target/ex-curl-dxc -Depth 3 | Select-Object -First 10 FullName
